@@ -68,6 +68,55 @@ namespace FrozenbyteEditorPatcher
             Color.FromArgb(255,  25,  25)  // Error
         };
 
+        private class ColorPatch
+        {
+            public enum ColorClass { None, Color, SystemColor };
+            public Color color;
+            public ColorClass colorclass;
+            public string colorname;
+
+            public ColorPatch(int r, int g, int b)
+            {
+                color = Color.FromArgb(r, g, b);
+            }
+
+            public ColorPatch(ColorClass colorclass, string colorname)
+            {
+                this.colorclass = colorclass;
+                this.colorname = colorname;
+            }
+        }
+
+
+        private static (Func<Instruction, bool>, ColorPatch) patchAllWhiteToWindow =>
+            ((inst => inst.OpCode == OpCodes.Call && ((MethodReference)inst.Operand).Name == "get_White"), new ColorPatch(ColorPatch.ColorClass.SystemColor, "Window"));
+
+        // type method (condition, color)
+        private static Dictionary<(string namespaze, string name), Dictionary<string, (Func<Instruction, bool> doesMatch, ColorPatch colorpatch)>> individualElementsColorPatchs = new ()
+        {
+            {
+                ("csharpui.window.dockable", "ObjectPropertiesWindow"), new ()
+                {
+                    { ".ctor"               , patchAllWhiteToWindow },
+                    { "endUpdate"           , patchAllWhiteToWindow },
+                    { "applySelectedObjects", patchAllWhiteToWindow }
+                }
+            },
+            { ("csharpui.window.dockable.objectexplorer", "SceneExplorer"), new () { { "InitializeComponent", patchAllWhiteToWindow } } },
+            {
+                ("csharpui.window.dockable.objectexplorer", "ResourceExplorer"), new ()
+                {
+                    { "InitializeComponent", ((inst => inst.OpCode == OpCodes.Call && ((MethodReference)inst.Operand).Name == "get_Ivory"), new ColorPatch(25, 25, 21)) }
+                }
+            },
+            {
+                ("csharpui.window.dockable.objectexplorer", "TypeExplorer"), new ()
+                {
+                    { "InitializeComponent", ((inst => inst.OpCode == OpCodes.Call && ((MethodReference)inst.Operand).Name == "FromArgb"), new ColorPatch(25, 25, 33)) }
+                }
+            },
+        };
+
 
         public static void Main(string[] args)
         {
@@ -94,10 +143,15 @@ namespace FrozenbyteEditorPatcher
             {
                 DownloadAndPatchDockPanelSuite(uiAssembly, gamePath, reportLines);
 
-                // Inject System Colors runtime patch
-                InjectSystemColorsRuntimePatchAndDarkWindowBorder(uiAssembly);
+                InjectSystemColorsRuntimePatch(uiAssembly);
+
+                InjectDarkWindowBorderPatch(uiAssembly);
 
                 PatchLogMessageColors(uiAssembly);
+
+                PatchTextColorsToBetterOnes(uiAssembly);
+
+                PatchSpecificColorInstructions(uiAssembly);
 
                 uiAssembly.Write();
             }
@@ -175,7 +229,7 @@ namespace FrozenbyteEditorPatcher
             mdiInitalizeComponentMethod.Body.Instructions.RemoveAt(setSkinFirstInstructionOffset);
         }
 
-        public static void InjectSystemColorsRuntimePatchAndDarkWindowBorder(AssemblyDefinition uiAssembly)
+        public static void InjectSystemColorsRuntimePatch(AssemblyDefinition uiAssembly)
         {
             // Fetch the required references
 
@@ -189,9 +243,7 @@ namespace FrozenbyteEditorPatcher
 
             ModuleDefinition mscorlibModule = uiAssembly.MainModule.AssemblyResolver.Resolve(uiAssembly.MainModule.AssemblyReferences.First(aref => aref.Name == "mscorlib")).MainModule;
             TypeReference int32Type = uiAssembly.MainModule.ImportReference(mscorlibModule.Types.Single(t => t.Namespace == "System" && t.Name == "Int32"));
-            TypeReference int32ByrefType = uiAssembly.MainModule.ImportReference(new ByReferenceType(int32Type));
             TypeReference int32ArrayType = uiAssembly.MainModule.ImportReference(new ArrayType(int32Type));
-            TypeReference intType = uiAssembly.MainModule.ImportReference(mscorlibModule.Types.Single(t => t.Namespace == "System" && t.Name == "IntPtr"));
             TypeDefinition typeType = mscorlibModule.Types.Single(t => t.Namespace == "System" && t.Name == "Type");
             MethodReference getTypeFromHandleMethod = uiAssembly.MainModule.ImportReference(typeType.Methods.Single(m => m.Name == "GetTypeFromHandle"));
             MethodReference getassemblyMethod = uiAssembly.MainModule.ImportReference(typeType.Methods.Single(m => m.Name == "get_Assembly"));
@@ -213,13 +265,14 @@ namespace FrozenbyteEditorPatcher
                 .Types.Single(typeref => typeref.Namespace == "csharpui" && typeref.Name == "CSharpUI")
                 .Methods.Single(methodref => methodref.Name == "createMDIWindow");
 
+            Console.WriteLine($"Injecting color patch");
+
             {
                 ILProcessor ilprocessor = createMDIWindowMethodRef.Body.GetILProcessor();
                 Instruction firstBranchInstruction = createMDIWindowMethodRef.Body.Instructions.First(inst => inst.OpCode == OpCodes.Brtrue_S);
                 firstBranchInstruction.OpCode = OpCodes.Brtrue; // We're too far for a short branch
                 Instruction firstPostBranchInstruction = firstBranchInstruction.Next;
 
-                Console.WriteLine($"Injecting color patch");
                 VariableDefinition colorVariable = new VariableDefinition(colorType);
                 createMDIWindowMethodRef.Body.Variables.Add(colorVariable);
                 // SystemColors.Window.ToArgb()
@@ -253,7 +306,15 @@ namespace FrozenbyteEditorPatcher
             }
 
 
-            // TODO put in another method
+        }
+        public static void InjectDarkWindowBorderPatch(AssemblyDefinition uiAssembly)
+        {
+            Console.WriteLine($"Resolving references to inject dark window patch");
+            ModuleDefinition mscorlibModule = uiAssembly.MainModule.AssemblyResolver.Resolve(uiAssembly.MainModule.AssemblyReferences.First(aref => aref.Name == "mscorlib")).MainModule;
+            TypeReference int32Type = uiAssembly.MainModule.ImportReference(mscorlibModule.Types.Single(t => t.Namespace == "System" && t.Name == "Int32"));
+            TypeReference int32ByrefType = uiAssembly.MainModule.ImportReference(new ByReferenceType(int32Type));
+            TypeReference intType = uiAssembly.MainModule.ImportReference(mscorlibModule.Types.Single(t => t.Namespace == "System" && t.Name == "IntPtr"));
+
 
             ModuleDefinition winformModule = uiAssembly.MainModule.AssemblyResolver.Resolve(uiAssembly.MainModule.AssemblyReferences.First(aref => aref.Name == "System.Windows.Forms")).MainModule;
             TypeDefinition formType = winformModule.Types.Single(typeref => typeref.Namespace == "System.Windows.Forms" && typeref.Name == "Control");
@@ -262,6 +323,9 @@ namespace FrozenbyteEditorPatcher
             MethodDefinition mdiConstructor = uiAssembly.MainModule
                 .Types.Single(t => t.Namespace == "csharpui.window.main" && t.Name == "CSharpUIMDI")
                 .GetConstructors().Single(c => !c.IsStatic);
+
+
+            Console.WriteLine($"Injecting DwmSetWindowAttribute");
 
             ModuleReference dwmapiModule = new ModuleReference("dwmapi.dll");
             uiAssembly.MainModule.ModuleReferences.Add(dwmapiModule);
@@ -274,6 +338,8 @@ namespace FrozenbyteEditorPatcher
             dwmSetWindowAttributeMethod.ImplAttributes = MethodImplAttributes.PreserveSig;
             dwmSetWindowAttributeMethod.PInvokeInfo = new PInvokeInfo(PInvokeAttributes.CallConvWinapi, "DwmSetWindowAttribute", dwmapiModule);
             mdiConstructor.DeclaringType.Methods.Add(dwmSetWindowAttributeMethod);
+
+            Console.WriteLine($"Injecting dark window patch");
 
             {
                 ILProcessor ilprocessor = mdiConstructor.Body.GetILProcessor();
@@ -311,5 +377,162 @@ namespace FrozenbyteEditorPatcher
                     string.Join("",logColors.Select(c => $@"\red{c.R}\green{c.G}\blue{c.B};")) +
                 @"}\fs16";
         }
+
+        public static void PatchTextColorsToBetterOnes(AssemblyDefinition uiAssembly)
+        {
+            ModuleDefinition systemDrawingModule = uiAssembly.MainModule
+                .AssemblyResolver.Resolve(
+                    uiAssembly.MainModule.AssemblyReferences.Single(aref => aref.Name == "System.Drawing"))
+                .MainModule;
+            TypeDefinition colorTypeDef = systemDrawingModule.Types.Single(typeref => typeref.Namespace == "System.Drawing" && typeref.Name == "Color");
+            TypeReference colorTypeRef = uiAssembly.MainModule.ImportReference(systemDrawingModule.Types.Single(typeref => typeref.Namespace == "System.Drawing" && typeref.Name == "Color"));
+
+            MethodReference getCyanMethod = uiAssembly.MainModule.ImportReference(colorTypeDef.Methods.Single(m => m.Name == "get_Cyan"));
+            MethodReference getGreenYellowMethod = uiAssembly.MainModule.ImportReference(colorTypeDef.Methods.Single(m => m.Name == "get_GreenYellow"));
+
+            foreach (TypeDefinition type in uiAssembly.MainModule.Types)
+            {
+                foreach (MethodDefinition methodDefinition in type.Methods)
+                {
+                    if (!methodDefinition.HasBody)
+                        continue;
+
+                    foreach (Instruction inst in methodDefinition.Body.Instructions)
+                    {
+                        if (inst.OpCode == OpCodes.Call)
+                        {
+                            MethodReference mref = inst.Operand as MethodReference;
+                            if (mref.DeclaringType.Name != "Color")
+                                continue;
+
+                            switch (mref.Name)
+                            {
+                                case "get_Blue": inst.Operand = getCyanMethod; break;
+                                case "get_Green": inst.Operand = getGreenYellowMethod; break;
+                            }
+                        }
+                    }
+                }
+            }
+
+        }
+
+        public static void PatchSpecificColorInstructions(AssemblyDefinition uiAssembly)
+        {
+            ModuleDefinition systemDrawingModule = uiAssembly.MainModule
+                .AssemblyResolver.Resolve(
+                    uiAssembly.MainModule.AssemblyReferences.Single(aref => aref.Name == "System.Drawing"))
+                .MainModule;
+
+            TypeDefinition colorTypeDef = systemDrawingModule.Types.Single(typeref => typeref.Namespace == "System.Drawing" && typeref.Name == "Color");
+            TypeDefinition systemcolorsType = systemDrawingModule.Types.Single(typeref => typeref.Namespace == "System.Drawing" && typeref.Name == "SystemColors");
+            MethodReference fromArgbMethod = uiAssembly.MainModule.ImportReference(
+                colorTypeDef.Methods.Single(m => m.Name == "FromArgb" && m.Parameters.Count == 3));
+
+
+
+            Dictionary<ColorPatch.ColorClass, Dictionary<string, MethodReference>> colorMethodReferences = new()
+            {
+                { ColorPatch.ColorClass.Color      , new () },
+                { ColorPatch.ColorClass.SystemColor, new () }
+            };
+
+            // Populate colorMethodReferences
+            foreach (var individualElementsColorPatchType in individualElementsColorPatchs)
+            {
+                foreach (var individualElementsColorPatchMethods in individualElementsColorPatchType.Value)
+                {
+                    ColorPatch colorpatch = individualElementsColorPatchMethods.Value.colorpatch;
+                    if (colorpatch.colorclass == ColorPatch.ColorClass.None || colorMethodReferences[colorpatch.colorclass].ContainsKey(colorpatch.colorname))
+                        continue;
+
+
+                    TypeDefinition typedef = colorpatch.colorclass == ColorPatch.ColorClass.Color
+                        ? colorTypeDef
+                        : systemcolorsType;
+
+                    colorMethodReferences[colorpatch.colorclass][colorpatch.colorname] = uiAssembly.MainModule.ImportReference(typedef.Methods.Single(m => m.Name == "get_" + colorpatch.colorname));
+                }
+            }
+
+            foreach (var individualElementsColorPatchType in individualElementsColorPatchs)
+            {
+                var typefullname = individualElementsColorPatchType.Key;
+                TypeDefinition typedef = uiAssembly.MainModule.Types.Single(t => t.Namespace == typefullname.namespaze && t.Name == typefullname.name);
+                foreach (var individualElementsColorPatchMethods in individualElementsColorPatchType.Value)
+                {
+                    foreach (MethodDefinition methoddef in typedef.Methods)
+                    {
+                        if (individualElementsColorPatchMethods.Key != methoddef.Name)
+                            continue;
+
+                        var instructions = methoddef.Body.Instructions;
+                        ILProcessor ilprocessor = methoddef.Body.GetILProcessor();
+                        for (int i = 0; i < instructions.Count; i++)
+                        {
+                            Instruction inst = instructions[i];
+                            var (doesMatch, colorpatch) = individualElementsColorPatchMethods.Value;
+                            if (!doesMatch(inst))
+                                continue;
+
+                            if (colorpatch.colorclass == ColorPatch.ColorClass.None)
+                            {
+                                if (((MethodReference)inst.Operand).Name == "FromArgb")
+                                {
+                                    if (
+                                        inst.Previous.Previous.Previous.OpCode == OpCodes.Ldc_I4 &&
+                                        inst.Previous.Previous         .OpCode == OpCodes.Ldc_I4 &&
+                                        inst.Previous                  .OpCode == OpCodes.Ldc_I4
+                                    )
+                                    {
+                                        inst.Previous.Previous.Previous.Operand = (int)colorpatch.color.R;
+                                        inst.Previous.Previous         .Operand = (int)colorpatch.color.G;
+                                        inst.Previous                  .Operand = (int)colorpatch.color.B;
+                                    }
+                                    else
+                                        throw new NotImplementedException("Patching a FromArgb requires the 3 previous instructions to all be ldc.i4");
+                                }
+                                else
+                                {
+                                    ilprocessor.InsertBefore(inst, ilprocessor.Create(OpCodes.Ldc_I4, (int)colorpatch.color.R));
+                                    ilprocessor.InsertBefore(inst, ilprocessor.Create(OpCodes.Ldc_I4, (int)colorpatch.color.G));
+                                    ilprocessor.InsertBefore(inst, ilprocessor.Create(OpCodes.Ldc_I4, (int)colorpatch.color.B));
+                                    ilprocessor.InsertBefore(inst, ilprocessor.Create(OpCodes.Call, fromArgbMethod));
+                                    ilprocessor.Remove(inst);
+                                    i += 3;
+                                }
+                            }
+                            else
+                            {
+                                if (((MethodReference)inst.Operand).Name == "FromArgb")
+                                {
+                                    if (
+                                        inst.Previous.Previous.Previous.OpCode == OpCodes.Ldc_I4 &&
+                                        inst.Previous.Previous.OpCode == OpCodes.Ldc_I4 &&
+                                        inst.Previous.OpCode == OpCodes.Ldc_I4
+                                    )
+                                    {
+                                        ilprocessor.InsertAfter(inst, ilprocessor.Create(OpCodes.Call, colorMethodReferences[colorpatch.colorclass][colorpatch.colorname]));
+                                        ilprocessor.Remove(inst.Previous.Previous.Previous);
+                                        ilprocessor.Remove(inst.Previous.Previous);
+                                        ilprocessor.Remove(inst.Previous);
+                                        ilprocessor.Remove(inst);
+                                        i -= 3;
+                                    }
+                                    else
+                                        throw new NotImplementedException("Patching a FromArgb requires the 3 previous instructions to all be ldc.i4");
+                                }
+                                else
+                                {
+                                    inst.Operand = colorMethodReferences[colorpatch.colorclass][colorpatch.colorname];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+        }
+
     }
 }
